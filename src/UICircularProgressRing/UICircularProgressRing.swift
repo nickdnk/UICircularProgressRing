@@ -861,6 +861,12 @@ fileprivate extension CALayer {
             ringLayer.isClockwise = isClockwise
         }
     }
+    
+    // This stores the animation when the timer is paused. We use this variable to continue the animation where it left off. See https://stackoverflow.com/questions/7568567/restoring-animation-where-it-left-off-when-app-resumes-from-background
+    private var pausedAnimationAtPosition : CAAnimation?
+    
+    // This variable stores how long remains on the timer when it's paused
+    private var pausedTimeRemaining : TimeInterval = 0
 
     /// Used to determine when the animation was paused
     private var animationPauseTime: CFTimeInterval?
@@ -1069,22 +1075,32 @@ fileprivate extension CALayer {
      Pauses the currently running animation and halts all progress.
 
      ## Important ##
-     This method should **only** be called when there is a currently running animation.
-     That is, after a call to `startProgress`.
+     This method has no effect unless called when there is a running animation. You should call this method when your app moves to the background (listen for UIApplicationWillResignActiveNotification) or when a parent view controller calls viewWillDisappear. You can use continueProgress to resume the animation where you left off or you can restart it entirely. This will depend on your logic. If you fail to call this method in the above cases your animation will halt and may not be able to restart properly.
 
      ## Author
-     Luis Padron
+     Luis Padron & Nicolai Cornelis
      */
     @objc open func pauseProgress() {
         guard isAnimating else {
-            fatalError("\(#file):\(#line) Attempt to pause progress with no currently running animation")
+            #if DEBUG
+            print("UICircularProgressRing: Progress was paused without having been started. This has no effect but may indicate that you're unnecessarily calling this method.")
+            #endif
+            return
         }
-
+        
+        pausedAnimationAtPosition = ringLayer.animation(forKey: .value)
+        
         let pauseTime = ringLayer.convertTime(CACurrentMediaTime(), from: nil)
         animationPauseTime = pauseTime
         ringLayer.timeOffset = pauseTime
 
         ringLayer.speed = 0.0
+        
+        if let fireTime = completionTimer?.fireDate {
+            pausedTimeRemaining = fireTime.timeIntervalSince(Date())
+        } else {
+            pausedTimeRemaining = 0
+        }
 
         //Cancel the timer, it will have to be re-created when we continue the progress
         completionTimer?.invalidate()
@@ -1094,29 +1110,30 @@ fileprivate extension CALayer {
     }
 
     /**
-     Continues the animation with it's remaining time from where it left off before it was paused.
+     Continues the animation with its remaining time from where it left off before it was paused.
 
      ## Important ##
-     This method should **only** be called when there is a currently paused animation.
-     That is, only call this method after you have called `pauseProgress`.
+     This method has no effect unless called when there is a paused animation. You should call this method when you wish to resume a paused animation. If your app pauses and continues animations when returning from the background, or when a view controller becomes active, you should call this method in viewDidAppear or listen for UIApplicationDidBecomeActiveNotification.
 
      ## Author
-     Luis Padron
+     Luis Padron & Nicolai Cornelis
      */
     @objc open func continueProgress() {
         guard let pauseTime = animationPauseTime else {
-            fatalError("\(#file):\(#line) Attempt to continue progress on a ring that was never paused")
+            #if DEBUG
+            print("UICircularProgressRing: Progress was continued without having been paused. This has no effect but may indicate that you're unnecessarily calling this method.")
+            #endif
+            return
         }
+        
+        ringLayer.add(pausedAnimationAtPosition!, forKey: AnimationKeys.value.rawValue)
 
         ringLayer.timeOffset = 0.0
         ringLayer.speed = 1.0
-        ringLayer.beginTime = 0.0
+        ringLayer.beginTime = ringLayer.convertTime(CACurrentMediaTime(), from: nil) - pauseTime
 
-        let currentTime = ringLayer.convertTime(CACurrentMediaTime(), from: nil)
-        ringLayer.beginTime = currentTime - pauseTime
-
-        //Create a new completion timer
-        completionTimer = Timer.scheduledTimer(timeInterval: currentTime - pauseTime,
+        // Create a new completion timer with the time left when the timer was paused
+        completionTimer = Timer.scheduledTimer(timeInterval: pausedTimeRemaining,
                                                target: self,
                                                selector: #selector(animationDidComplete),
                                                userInfo: completion,
